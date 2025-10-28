@@ -1,0 +1,348 @@
+const djs = require("discord.js");
+const fs = require("fs");
+const pth = require("path");
+const web = require("https");
+const { state: st, playNext: nxt } = require("./audioPlayer");
+const g_s = [
+ "pop",
+ "rock",
+ "alt rock",
+ "heavy metal",
+ "hip-hop",
+ "rap",
+ "classical",
+ "electronic",
+ "other",
+];
+const a_f = process.env.AUDIO_FOLDER || "./audio";
+const cmd = [
+ {
+  name: "play",
+  description: "Lance une chanson du serveur",
+  options: [
+   {
+    name: "genre",
+    description: "Le genre de musique",
+    type: djs.ApplicationCommandOptionType.String,
+    required: true,
+    choices: g_s.map((g) => ({ name: g, value: g })),
+   },
+   {
+    name: "filename",
+    description: "Le titre de la chanson",
+    type: djs.ApplicationCommandOptionType.String,
+    required: true,
+    autocomplete: true,
+   },
+  ],
+ },
+ {
+  name: "playall",
+  description: "Lance la playlist dans le genre choisi",
+  options: [
+   {
+    name: "genre",
+    description: "Le genre de chansons à choisir",
+    type: djs.ApplicationCommandOptionType.String,
+    required: true,
+    choices: g_s.map((g) => ({ name: g, value: g })),
+   },
+   {
+    name: "shuffle",
+    description: "Mélange les titres avant la lecture",
+    type: djs.ApplicationCommandOptionType.Boolean,
+    required: false,
+   },
+   {
+    name: "loop",
+    description: "Lecture en boucle",
+    type: djs.ApplicationCommandOptionType.Boolean,
+    required: false,
+   },
+  ],
+ },
+ {
+  name: "upload",
+  description: "Télécharge la chanson",
+  options: [
+   {
+    name: "file",
+    description: "nom du fichier à télécharger",
+    type: djs.ApplicationCommandOptionType.Attachment,
+    required: true,
+   },
+   {
+    name: "genre",
+    description: "Le genre de la chanson",
+    type: djs.ApplicationCommandOptionType.String,
+    required: true,
+    choices: g_s.map((g) => ({ name: g, value: g })),
+   },
+  ],
+ },
+ {
+  name: "pause",
+  description: "Pause dans la lecture",
+ },
+ {
+  name: "resume",
+  description: "Recommence la lecture",
+ },
+ {
+  name: "stop",
+  description: "Stop la lecture et la playlist",
+ },
+ {
+  name: "skip",
+  description: "Passe à la prochaine chanson",
+ },
+ {
+  name: "clearqueue",
+  description: "Efface la playlist",
+ },
+];
+async function handleCommands(int) {
+ const { commandName, options } = int;
+ if (commandName === "play") {
+  const gen = options.getString("genre");
+  const fn = options.getString("filename");
+  if (!fn) {
+   return int.reply({
+    content: "Please provide a filename to play!",
+    ephemeral: true,
+   });
+  }
+  const vc = int.member.voice.channel;
+  if (!vc) {
+   return int.reply({
+    content: "You need to be in a voice channel to play audio!",
+    ephemeral: true,
+   });
+  }
+  try {
+   await int.deferReply({ ephemeral: true });
+   const fp = pth.join(a_f, gen, fn);
+   if (!fs.existsSync(fp)) {
+    return int.followUp({
+     content: "The specified audio file does not exist.",
+     ephemeral: true,
+    });
+   }
+   st.queue.push({
+    path: fp,
+    requester: int.user,
+    genre: gen,
+   });
+   int.followUp({
+    content: `Added "${fn}" (${gen}) to the queue.`,
+    ephemeral: true,
+   });
+   if (!st.isPlaying) {
+    nxt(vc, int);
+   }
+  } catch (e) {
+   console.error("Error in play command:", e);
+   int.followUp({
+    content:
+     "An error occurred while processing your request. Please try again later.",
+    ephemeral: true,
+   });
+  }
+ } else if (commandName === "playall") {
+  const genre = options.getString("genre");
+  const shuffle = options.getBoolean("shuffle") || false;
+  const loop = options.getBoolean("loop") || false;
+  const vc = int.member.voice.channel;
+
+  if (!vc) {
+   return int.reply({
+    content: "You need to be in a voice channel to play audio!",
+    ephemeral: true,
+   });
+  }
+
+  try {
+   await int.deferReply({ ephemeral: true });
+   const genrePath = pth.join(a_f, genre);
+
+   if (!fs.existsSync(genrePath)) {
+    return int.followUp({
+     content: `The genre folder "${genre}" does not exist.`,
+     ephemeral: true,
+    });
+   }
+
+   const files = fs.readdirSync(genrePath);
+   const audioFiles = files.filter((file) => {
+    const ext = pth.extname(file).toLowerCase();
+    return [".mp3", ".wav", ".ogg", ".flac", ".m4a"].includes(ext);
+   });
+
+   if (audioFiles.length === 0) {
+    return int.followUp({
+     content: `No audio files found in the "${genre}" genre.`,
+     ephemeral: true,
+    });
+   }
+
+   if (shuffle) {
+    for (let i = audioFiles.length - 1; i > 0; i--) {
+     const j = Math.floor(Math.random() * (i + 1));
+     [audioFiles[i], audioFiles[j]] = [audioFiles[j], audioFiles[i]];
+    }
+   }
+
+   if (loop) {
+    st.loopMode = true;
+    st.loopGenre = genre;
+    st.loopFiles = [...audioFiles];
+   } else {
+    st.loopMode = false;
+    st.loopGenre = null;
+    st.loopFiles = [];
+   }
+
+   for (const file of audioFiles) {
+    st.queue.push({
+     path: pth.join(genrePath, file),
+     requester: int.user,
+     genre: genre,
+    });
+   }
+
+   int.followUp({
+    content: `Added ${audioFiles.length} ${genre} songs to the queue${
+     shuffle ? " (shuffled)" : ""
+    }${loop ? " (looping enabled)" : ""}.`,
+    ephemeral: true,
+   });
+
+   if (!st.isPlaying) {
+    nxt(vc, int);
+   }
+  } catch (e) {
+   console.error("Error in playall command:", e);
+   int.followUp({
+    content:
+     "An error occurred while processing your request. Please try again later.",
+    ephemeral: true,
+   });
+  }
+ } else if (commandName === "upload") {
+  const f = options.getAttachment("file");
+  const gen = options.getString("genre");
+  if (!f) {
+   return int.reply({
+    content: "Please provide an audio file to upload.",
+    ephemeral: true,
+   });
+  }
+  if (!f.contentType.startsWith("audio/")) {
+   return int.reply({
+    content: "The uploaded file is not an audio file.",
+    ephemeral: true,
+   });
+  }
+  await int.deferReply({ ephemeral: true });
+  const fn = `${Date.now()}_${f.name}`;
+  const fp = pth.join(a_f, gen, fn);
+  const dir = pth.join(a_f, gen);
+  if (!fs.existsSync(dir)) {
+   fs.mkdirSync(dir, { recursive: true });
+  }
+  web
+   .get(f.url, (res) => {
+    const ws = fs.createWriteStream(fp);
+    res.pipe(ws);
+
+    ws.on("finish", () => {
+     ws.close();
+     int.followUp({
+      content: `File "${fn}" has been uploaded successfully to the ${gen} genre!`,
+      ephemeral: true,
+     });
+    });
+   })
+   .on("error", (e) => {
+    console.error("Error downloading file:", e);
+    int.followUp({
+     content: "An error occurred while uploading the file.",
+     ephemeral: true,
+    });
+   });
+ } else if (commandName === "pause") {
+  if (!st.player) {
+   return int.reply({
+    content: "There is no audio playing.",
+    ephemeral: true,
+   });
+  }
+  st.player.pause();
+  int.reply({
+   content: "Paused the current audio.",
+   ephemeral: true,
+  });
+ } else if (commandName === "resume") {
+  if (!st.player) {
+   return int.reply({
+    content: "There is no audio playing.",
+    ephemeral: true,
+   });
+  }
+  st.player.unpause();
+  int.reply({
+   content: "Resumed the current audio.",
+   ephemeral: true,
+  });
+ } else if (commandName === "stop") {
+  if (!st.player && st.queue.length === 0) {
+    return int.reply({
+      content: "There is no audio playing or in the queue.",
+      ephemeral: true,
+    });
+  }
+  if (st.player) {
+    st.player.stop();
+  }
+  st.queue.length = 0;
+  st.loopMode = false;
+  st.loopGenre = null;
+  st.loopFiles = [];
+  int.client.user.setPresence({
+    activities: [
+      { name: "Nothing is currently playing", type: djs.ActivityType.Listening },
+    ],
+  });
+  int.reply({
+    content: "Stopped the current audio and cleared the queue.",
+    ephemeral: true,
+  });
+ } else if (commandName === "skip") {
+  if (!st.player) {
+   return int.reply({
+    content: "There is no audio playing.",
+    ephemeral: true,
+   });
+  }
+  st.player.stop();
+  int.reply({
+   content: "Skipped the current audio.",
+   ephemeral: true,
+  });
+ } else if (commandName === "clearqueue") {
+  if (st.queue.length === 0) {
+   return int.reply({
+    content: "The queue is already empty.",
+    ephemeral: true,
+   });
+  }
+  st.queue.length = 0;
+  int.reply({ content: "Cleared the queue.", ephemeral: true });
+ }
+}
+module.exports = {
+ commands: cmd,
+ handleCommands,
+ GENRES: g_s,
+ AUDIO_FOLDER: a_f,
+};
